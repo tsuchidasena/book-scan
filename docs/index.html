@@ -292,7 +292,7 @@ function showSetup() {
 }
 $('saveUrl').onclick = () => {
   const url = $('gasUrl').value.trim();
-  if (!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec$/.test(url)) {
+  if (!/^https:\/\/script\.google\.com\/(a\/macros\/[^/]+|macros)\/s\/[^/]+\/exec$/.test(url)) {
     setStatus('URL は https://script.google.com/macros/s/…/exec の形です', 'err');
     return;
   }
