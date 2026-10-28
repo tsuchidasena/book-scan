@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>蔵書スキャン</title>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  :root {
+    --bg: #f6f5f2; --card: #fff; --text: #1f1f1f; --muted: #6b6b6b;
+    --line: #dddad3; --accent: #2f6f5e; --warn-bg: #fff4e0; --warn: #9a5b00;
+    --ok: #2f6f5e; --err: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161616; --card: #222; --text: #eee; --muted: #a0a0a0;
+      --line: #3a3a3a; --accent: #6fbfa8; --warn-bg: #3a2c12; --warn: #f0b860;
+      --ok: #6fbfa8; --err: #f28b82;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif;
+    padding: 12px 16px calc(24px + env(safe-area-inset-bottom));
+  }
+  main { max-width: 480px; margin: 0 auto; display: grid; gap: 12px; }
+  h1 { font-size: 18px; margin: 4px 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  #reader { width: 100%; border-radius: 8px; overflow: hidden; background: #000; min-height: 160px; }
+  #reader video { width: 100% !important; }
+  .row { display: flex; gap: 8px; }
+  .row > input { flex: 1; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  input {
+    width: 100%; font-size: 16px; padding: 10px 12px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--text);
+  }
+  button {
+    font-size: 16px; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--card); color: var(--text); cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; width: 100%; margin-top: 14px; padding: 12px; }
+  button:disabled { opacity: .5; }
+  .hint { font-size: 13px; color: var(--muted); margin: 8px 0 0; }
+  .warn { background: var(--warn-bg); color: var(--warn); border-radius: 8px; padding: 10px 12px; margin-top: 12px; font-size: 14px; }
+  #status { font-size: 14px; min-height: 1.5em; }
+  #status.ok { color: var(--ok); } #status.err { color: var(--err); }
+  [hidden] { display: none !important; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>蔵書スキャン</h1>
+
+  <section class="card" id="setup" hidden>
+    <label for="gasUrl">Apps Script のウェブアプリURL</label>
+    <input id="gasUrl" placeholder="https://script.google.com/macros/s/…/exec" inputmode="url">
+    <button class="primary" id="saveUrl">保存</button>
+  </section>
+
+  <section class="card" id="scan">
+    <div id="reader"></div>
+    <p class="hint">裏表紙の上段（978 / 979 で始まる方）にカメラを向けてください。</p>
+    <div class="row" style="margin-top:10px">
+      <input id="manualIsbn" placeholder="ISBN を手入力" inputmode="numeric">
+      <button id="manualBtn">検索</button>
+    </div>
+  </section>
+
+  <div id="status"></div>
+
+  <section class="card" id="form" hidden>
+    <div class="hint" id="isbnLine"></div>
+    <label for="location">保管場所</label>
+    <input id="location" list="locationList" autocomplete="off">
+    <datalist id="locationList"></datalist>
+    <label for="title">書籍名</label>
+    <input id="title">
+    <label for="author">著者名</label>
+    <input id="author">
+    <label for="publisher">出版社</label>
+    <input id="publisher">
+    <label for="genre">ジャンル</label>
+    <input id="genre" list="genreList" autocomplete="off">
+    <datalist id="genreList"></datalist>
+
+    <div class="warn" id="dupWarn" hidden></div>
+
+    <button class="primary" id="saveBtn">登録する</button>
+    <button id="cancelBtn" style="width:100%;margin-top:8px">やめて次をスキャン</button>
+  </section>
+
+  <details>
+    <summary>設定</summary>
+    <button id="editUrl" style="margin-top:8px">ウェブアプリURLを変更</button>
+  </details>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const store = {
+  get(k) { try { return localStorage.getItem(k) || ''; } catch { return ''; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+
+let gasUrl = store.get('gasUrl');
+let scanner = null;
+let busy = false;
+let current = null;   // { isbn, duplicates }
+let force = false;
+
+// ---- ISBN ----
+
+function ean13Valid(d) {
+  if (!/^\d{13}$/.test(d)) return false;
+  let sum = 0;
+  for (let i = 0; i < 12; i++) sum += Number(d[i]) * (i % 2 ? 3 : 1);
+  return (10 - (sum % 10)) % 10 === Number(d[12]);
+}
+
+function toIsbn13(s) {
+  const d = s.replace(/[^0-9Xx]/g, '').toUpperCase();
+  if (d.length === 13) return ean13Valid(d) && /^97[89]/.test(d) ? d : '';
+  if (d.length === 10) {
+    const core = '978' + d.slice(0, 9);
+    let sum = 0;
+    for (let i = 0; i < 12; i++) sum += Number(core[i]) * (i % 2 ? 3 : 1);
+    return core + ((10 - (sum % 10)) % 10);
+  }
+  return '';
+}
+
+// ---- 画面 ----
+
+function setStatus(msg, kind = '') {
+  $('status').textContent = msg;
+  $('status').className = kind;
+}
+
+function fillOptions(opts) {
+  if (!opts) return;
+  const fill = (el, list) => el.replaceChildren(...list.map(v => Object.assign(document.createElement('option'), { value: v })));
+  fill($('locationList'), opts.locations || []);
+  fill($('genreList'), opts.genres || []);
+}
+
+function showForm(isbn, book, duplicates) {
+  current = { isbn, duplicates };
+  force = false;
+  $('isbnLine').textContent = `ISBN ${isbn}` + (book ? `（${book.source}）` : '（書誌が見つかりませんでした。手入力してください）');
+  $('title').value = book?.title || '';
+  $('author').value = book?.author || '';
+  $('publisher').value = book?.publisher || '';
+  $('location').value = store.get('lastLocation');
+  $('genre').value = '';
+  showDuplicates(duplicates);
+  $('form').hidden = false;
+  $('scan').hidden = true;
+  $('genre').focus({ preventScroll: true });
+}
+
+function showDuplicates(dups) {
+  if (!dups || !dups.length) {
+    $('dupWarn').hidden = true;
+    $('saveBtn').textContent = '登録する';
+    return;
+  }
+  const where = dups.map(d => `${d.location || '保管場所なし'}（${d.date}）`).join('、');
+  $('dupWarn').textContent = `この本はすでに ${dups.length} 冊登録されています：${where}。それでも登録する場合は下のボタンを押してください。`;
+  $('dupWarn').hidden = false;
+  $('saveBtn').textContent = 'それでも登録する';
+  force = true;
+}
+
+function resetToScan() {
+  current = null;
+  $('form').hidden = true;
+  $('scan').hidden = false;
+  $('manualIsbn').value = '';
+  startScanner();
+}
+
+// ---- 通信 ----
+
+async function api(method, payload) {
+  if (!gasUrl) throw new Error('ウェブアプリURLが未設定です');
+  const res = method === 'GET'
+    ? await fetch(gasUrl + '?' + new URLSearchParams(payload))
+    : await fetch(gasUrl, { method: 'POST', body: JSON.stringify(payload) }); // text/plain なのでプリフライトなし
+  if (!res.ok) throw new Error(`通信エラー（${res.status}）`);
+  return res.json();
+}
+
+async function handleIsbn(isbn) {
+  if (busy) return;
+  busy = true;
+  await stopScanner();
+  setStatus(`${isbn} を検索中…`);
+  try {
+    const data = await api('GET', { isbn });
+    fillOptions(data.options);
+    setStatus('');
+    showForm(isbn, data.book, data.duplicates);
+  } catch (err) {
+    setStatus(err.message, 'err');
+    resetToScan();
+  } finally {
+    busy = false;
+  }
+}
+
+async function save() {
+  const payload = {
+    isbn: current.isbn,
+    location: $('location').value.trim(),
+    title: $('title').value.trim(),
+    author: $('author').value.trim(),
+    publisher: $('publisher').value.trim(),
+    genre: $('genre').value.trim(),
+    force,
+  };
+  if (!payload.title) { setStatus('書籍名を入力してください', 'err'); return; }
+
+  $('saveBtn').disabled = true;
+  try {
+    const res = await api('POST', payload);
+    if (res.status === 'duplicate') {
+      // 検索後に別端末から登録された場合など
+      showDuplicates(res.duplicates);
+      return;
+    }
+    if (res.status !== 'ok') throw new Error(res.message || '登録に失敗しました');
+    store.set('lastLocation', payload.location);
+    setStatus(`登録しました：${payload.title}`, 'ok');
+    resetToScan();
+  } catch (err) {
+    setStatus(err.message, 'err');
+  } finally {
+    $('saveBtn').disabled = false;
+  }
+}
+
+// ---- カメラ ----
+
+async function startScanner() {
+  if (!gasUrl) return;
+  if (!scanner) {
+    scanner = new Html5Qrcode('reader', {
+      formatsToSupport: [Html5QrcodeSupportedFormats.EAN_13],
+      experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+      verbose: false,
+    });
+  }
+  if (scanner.isScanning) return;
+  try {
+    await scanner.start(
+      { facingMode: 'environment' },
+      { fps: 10, qrbox: (w, h) => ({ width: Math.floor(w * 0.85), height: Math.floor(Math.min(h, w) * 0.4) }) },
+      text => {
+        const isbn = toIsbn13(text);
+        if (isbn) handleIsbn(isbn);   // 下段の価格コード（192…）はここで無視される
+      },
+      () => {}
+    );
+  } catch (err) {
+    setStatus('カメラを起動できませんでした。ブラウザのカメラ許可を確認するか、ISBN を手入力してください。', 'err');
+  }
+}
+
+async function stopScanner() {
+  if (scanner?.isScanning) {
+    try { await scanner.stop(); } catch {}
+  }
+}
+
+// ---- 配線 ----
+
+$('manualBtn').onclick = () => {
+  const isbn = toIsbn13($('manualIsbn').value);
+  if (isbn) handleIsbn(isbn);
+  else setStatus('ISBN の形式が正しくありません（10桁か13桁）', 'err');
+};
+$('manualIsbn').addEventListener('keydown', e => { if (e.key === 'Enter') $('manualBtn').click(); });
+$('saveBtn').onclick = save;
+$('cancelBtn').onclick = () => { setStatus(''); resetToScan(); };
+
+function showSetup() {
+  $('setup').hidden = false;
+  $('gasUrl').value = gasUrl;
+}
+$('saveUrl').onclick = () => {
+  const url = $('gasUrl').value.trim();
+  if (!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec$/.test(url)) {
+    setStatus('URL は https://script.google.com/macros/s/…/exec の形です', 'err');
+    return;
+  }
+  gasUrl = url;
+  store.set('gasUrl', url);
+  $('setup').hidden = true;
+  setStatus('');
+  api('GET', {}).then(d => fillOptions(d.options)).catch(err => setStatus(err.message, 'err'));
+  startScanner();
+};
+$('editUrl').onclick = showSetup;
+
+if (gasUrl) {
+  api('GET', {}).then(d => fillOptions(d.options)).catch(() => {});
+  startScanner();
+} else {
+  showSetup();
+}
+</script>
+</body>
+</html>
