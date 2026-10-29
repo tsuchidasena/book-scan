@@ -60,6 +60,12 @@
     <button class="primary" id="saveUrl">保存</button>
   </section>
 
+  <section class="card" id="auth" hidden>
+    <label for="passcode">パスワード</label>
+    <input id="passcode" type="password" autocomplete="current-password">
+    <button class="primary" id="savePass">はじめる</button>
+  </section>
+
   <section class="card" id="scan">
     <div id="reader"></div>
     <p class="hint">裏表紙の上段（978 / 979 で始まる方）にカメラを向けてください。</p>
@@ -95,6 +101,7 @@
   <details>
     <summary>設定</summary>
     <button id="editUrl" style="margin-top:8px">ウェブアプリURLを変更</button>
+    <button id="editPass" style="margin-top:8px">パスワードを入れ直す</button>
   </details>
 </main>
 
@@ -108,6 +115,7 @@ const store = {
 // 端末に設定がなければこれを使う。デプロイし直して URL が変わったらここも更新する
 const DEFAULT_GAS_URL = 'https://script.google.com/a/macros/liginc.co.jp/s/AKfycbxHq5i4mFgBh6YN0MXGukJVYKQEzwy1GEm8VUL3Nthu_eLCD_bSUbrl7y-5ABQb1Ysj/exec';
 let gasUrl = store.get('gasUrl') || DEFAULT_GAS_URL;
+let passcode = store.get('passcode');
 let scanner = null;
 let busy = false;
 let current = null;   // { isbn, duplicates }
@@ -186,19 +194,26 @@ function resetToScan() {
 
 // ---- 通信 ----
 
-async function api(method, payload) {
+async function api(action, payload = {}) {
   if (!gasUrl) throw new Error('ウェブアプリURLが未設定です');
   let res;
   try {
-    res = method === 'GET'
-      ? await fetch(gasUrl + '?' + new URLSearchParams(payload))
-      : await fetch(gasUrl, { method: 'POST', body: JSON.stringify(payload) }); // text/plain なのでプリフライトなし
+    // パスワードを URL に載せないよう全部 POST。text/plain なのでプリフライトなし
+    res = await fetch(gasUrl, { method: 'POST', body: JSON.stringify({ ...payload, action, key: passcode }) });
   } catch {
     // ログイン必須のデプロイだとログイン画面へ転送され、CORS で落ちてここに来る
     throw new Error('スクリプトに接続できません。デプロイの「アクセスできるユーザー」が「全員」になっているか確認してください。');
   }
   if (!res.ok) throw new Error(`通信エラー（${res.status}）`);
-  return res.json();
+  const data = await res.json();
+  if (data.status === 'unauthorized') {
+    passcode = '';
+    store.set('passcode', '');
+    await stopScanner();
+    showAuth();
+    throw new Error(data.message || 'パスワードが違います');
+  }
+  return data;
 }
 
 async function handleIsbn(isbn) {
@@ -207,13 +222,13 @@ async function handleIsbn(isbn) {
   await stopScanner();
   setStatus(`${isbn} を検索中…`);
   try {
-    const data = await api('GET', { isbn });
+    const data = await api('lookup', { isbn });
     fillOptions(data.options);
     setStatus('');
     showForm(isbn, data.book, data.duplicates);
   } catch (err) {
     setStatus(err.message, 'err');
-    resetToScan();
+    if (passcode) resetToScan();
   } finally {
     busy = false;
   }
@@ -233,7 +248,7 @@ async function save() {
 
   $('saveBtn').disabled = true;
   try {
-    const res = await api('POST', payload);
+    const res = await api('save', payload);
     if (res.status === 'duplicate') {
       // 検索後に別端末から登録された場合など
       showDuplicates(res.duplicates);
@@ -253,7 +268,7 @@ async function save() {
 // ---- カメラ ----
 
 async function startScanner() {
-  if (!gasUrl) return;
+  if (!gasUrl || !passcode) return;
   if (!scanner) {
     scanner = new Html5Qrcode('reader', {
       formatsToSupport: [Html5QrcodeSupportedFormats.EAN_13],
@@ -310,10 +325,41 @@ $('saveUrl').onclick = () => {
   store.set('gasUrl', url);
   $('setup').hidden = true;
   setStatus('');
-  api('GET', {}).then(d => fillOptions(d.options)).catch(err => setStatus(err.message, 'err'));
-  startScanner();
+  boot();
 };
 $('editUrl').onclick = showSetup;
+
+function showAuth() {
+  $('auth').hidden = false;
+  $('scan').hidden = true;
+  $('form').hidden = true;
+  $('passcode').value = '';
+}
+$('savePass').onclick = () => {
+  const p = $('passcode').value;
+  if (!p) return;
+  passcode = p;
+  $('auth').hidden = true;
+  $('scan').hidden = false;
+  setStatus('確認中…');
+  boot(true);
+};
+$('passcode').addEventListener('keydown', e => { if (e.key === 'Enter') $('savePass').click(); });
+$('editPass').onclick = async () => { await stopScanner(); showAuth(); };
+
+// 候補の取得を兼ねてパスワードを確かめ、通ったらカメラを起動する
+async function boot(fresh = false) {
+  if (!gasUrl) return showSetup();
+  if (!passcode) return showAuth();
+  try {
+    const d = await api('options');
+    if (fresh) { store.set('passcode', passcode); setStatus(''); }
+    fillOptions(d.options);
+    startScanner();
+  } catch (err) {
+    setStatus(err.message, 'err');
+  }
+}
 
 // #u=<ウェブアプリURL> 付きで開かれたら記憶する。# 以降はサーバーに送られない
 const fromHash = new URLSearchParams(location.hash.slice(1)).get('u');
@@ -328,12 +374,7 @@ if (fromHash) {
   }
 }
 
-if (gasUrl) {
-  api('GET', {}).then(d => fillOptions(d.options)).catch(() => {});
-  startScanner();
-} else {
-  showSetup();
-}
+boot();
 </script>
 </body>
 </html>
