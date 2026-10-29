@@ -105,7 +105,9 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, v); } catch {} },
 };
 
-let gasUrl = store.get('gasUrl');
+// 端末に設定がなければこれを使う。デプロイし直して URL が変わったらここも更新する
+const DEFAULT_GAS_URL = 'https://script.google.com/a/macros/liginc.co.jp/s/AKfycbxHq5i4mFgBh6YN0MXGukJVYKQEzwy1GEm8VUL3Nthu_eLCD_bSUbrl7y-5ABQb1Ysj/exec';
+let gasUrl = store.get('gasUrl') || DEFAULT_GAS_URL;
 let scanner = null;
 let busy = false;
 let current = null;   // { isbn, duplicates }

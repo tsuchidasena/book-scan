@@ -24,6 +24,8 @@ https://tsuchidasena.github.io/book-scan/
 
 `docs/` を push すると数分で反映される。
 
+ウェブアプリURLは `docs/index.html` の `DEFAULT_GAS_URL` に埋め込み済みなので、ページを開くだけで使える。Apps Script を「新しいデプロイ」で作り直して URL が変わったら、ここを書き換えて push する（「デプロイを管理」で新バージョンにする分には URL は変わらない）。
+
 ## 3. 使い方
 
 1. スマホでページを開き、手順 1 の URL を貼って保存（端末に記憶される）
