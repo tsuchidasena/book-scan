@@ -1,27 +1,49 @@
 // 蔵書スキャン — スプレッドシートに紐づける Apps Script。
-// GET  ?isbn=XXXXXXXXXXXXX  → 書誌情報 + 既存登録 + 入力候補
-// GET  (isbn なし)           → 入力候補のみ
-// POST {isbn, location, title, author, publisher, genre, force}
-//      → 重複があり force でなければ {status:'duplicate'}、それ以外は追記して {status:'ok'}
+// すべて POST {action, key, ...}。key はスクリプト プロパティ APP_PASSCODE と一致しないと弾く
+//   options                       → 入力候補
+//   lookup {isbn}                 → 書誌情報 + 既存登録 + 入力候補
+//   save {isbn, location, title, author, publisher, genre, force}
+//        → 重複があり force でなければ {status:'duplicate'}、それ以外は追記して {status:'ok'}
 
 const SHEET_NAME = '蔵書';
 const HEADERS = ['保管場所', '書籍名', '著者名', '出版社', 'ジャンル', 'ISBN', '登録日時'];
 const COL = { location: 0, title: 1, author: 2, publisher: 3, genre: 4, isbn: 5, date: 6 };
 
-function doGet(e) {
-  const isbn = normalizeIsbn_((e.parameter || {}).isbn || '');
-  const rows = readRows_();
-  const res = { options: options_(rows) };
-  if (isbn) {
-    res.isbn = isbn;
-    res.book = lookup_(isbn);
-    res.duplicates = duplicatesOf_(rows, isbn);
-  }
-  return json_(res);
+function doGet() {
+  return json_({ status: 'error', message: 'POST で呼んでください' });
 }
 
 function doPost(e) {
-  const body = JSON.parse(e.postData.contents);
+  let body;
+  try {
+    body = JSON.parse(e.postData.contents);
+  } catch (err) {
+    return json_({ status: 'error', message: '不正なリクエストです' });
+  }
+
+  const expected = PropertiesService.getScriptProperties().getProperty('APP_PASSCODE');
+  if (!expected) return json_({ status: 'unauthorized', message: 'スクリプト側でパスワード（APP_PASSCODE）が未設定です' });
+  if (body.key !== expected) return json_({ status: 'unauthorized', message: 'パスワードが違います' });
+
+  if (body.action === 'options') return json_({ options: options_(readRows_()) });
+  if (body.action === 'lookup') return lookupAction_(body);
+  if (body.action === 'save') return saveAction_(body);
+  return json_({ status: 'error', message: '不明な操作です' });
+}
+
+function lookupAction_(body) {
+  const isbn = normalizeIsbn_(body.isbn || '');
+  if (!isbn) return json_({ status: 'error', message: 'ISBN が正しくありません' });
+  const rows = readRows_();
+  return json_({
+    isbn: isbn,
+    book: lookup_(isbn),
+    duplicates: duplicatesOf_(rows, isbn),
+    options: options_(rows),
+  });
+}
+
+function saveAction_(body) {
   const isbn = normalizeIsbn_(body.isbn || '');
   if (!body.title) return json_({ status: 'error', message: '書籍名が空です' });
 
