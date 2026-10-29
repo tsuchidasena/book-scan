@@ -186,9 +186,15 @@ function resetToScan() {
 
 async function api(method, payload) {
   if (!gasUrl) throw new Error('ウェブアプリURLが未設定です');
-  const res = method === 'GET'
-    ? await fetch(gasUrl + '?' + new URLSearchParams(payload))
-    : await fetch(gasUrl, { method: 'POST', body: JSON.stringify(payload) }); // text/plain なのでプリフライトなし
+  let res;
+  try {
+    res = method === 'GET'
+      ? await fetch(gasUrl + '?' + new URLSearchParams(payload))
+      : await fetch(gasUrl, { method: 'POST', body: JSON.stringify(payload) }); // text/plain なのでプリフライトなし
+  } catch {
+    // ログイン必須のデプロイだとログイン画面へ転送され、CORS で落ちてここに来る
+    throw new Error('スクリプトに接続できません。デプロイの「アクセスできるユーザー」が「全員」になっているか確認してください。');
+  }
   if (!res.ok) throw new Error(`通信エラー（${res.status}）`);
   return res.json();
 }
