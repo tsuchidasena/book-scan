@@ -42,6 +42,10 @@
   }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; width: 100%; margin-top: 14px; padding: 12px; }
   button:disabled { opacity: .5; }
+  .filebtn {
+    display: block; text-align: center; font-size: 15px; color: var(--text); margin: 10px 0 0;
+    padding: 10px 14px; border-radius: 8px; border: 1px solid var(--line); cursor: pointer;
+  }
   .hint { font-size: 13px; color: var(--muted); margin: 8px 0 0; }
   .warn { background: var(--warn-bg); color: var(--warn); border-radius: 8px; padding: 10px 12px; margin-top: 12px; font-size: 14px; }
   #status { font-size: 14px; min-height: 1.5em; }
@@ -68,7 +72,13 @@
 
   <section class="card" id="scan">
     <div id="reader"></div>
-    <p class="hint">裏表紙の上段（978 / 979 で始まる方）にカメラを向けてください。</p>
+    <div class="row" id="zoomRow" hidden style="align-items:center;margin-top:10px">
+      <span class="hint" style="margin:0">ズーム <span id="zoomVal"></span></span>
+      <input id="zoom" type="range" style="flex:1;padding:0">
+    </div>
+    <p class="hint">裏表紙の上段（978 / 979 で始まる方）を映してください。ぼやけるときは近づけず、ピントが合うところ（15〜20cm）まで離してください。</p>
+    <label class="filebtn">写真を撮って読み取る<input id="photo" type="file" accept="image/*" capture="environment" hidden></label>
+    <div id="fileReader" hidden></div>
     <div class="row" style="margin-top:10px">
       <input id="manualIsbn" placeholder="ISBN を手入力" inputmode="numeric">
       <button id="manualBtn">検索</button>
@@ -267,30 +277,80 @@ async function save() {
 
 // ---- カメラ ----
 
+const newReader = id => new Html5Qrcode(id, {
+  formatsToSupport: [Html5QrcodeSupportedFormats.EAN_13],
+  experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+  verbose: false,
+});
+
 async function startScanner() {
   if (!gasUrl || !passcode) return;
-  if (!scanner) {
-    scanner = new Html5Qrcode('reader', {
-      formatsToSupport: [Html5QrcodeSupportedFormats.EAN_13],
-      experimentalFeatures: { useBarCodeDetectorIfSupported: true },
-      verbose: false,
-    });
-  }
+  if (!scanner) scanner = newReader('reader');
   if (scanner.isScanning) return;
   try {
     await scanner.start(
       { facingMode: 'environment' },
-      { fps: 10, qrbox: (w, h) => ({ width: Math.floor(w * 0.85), height: Math.floor(Math.min(h, w) * 0.4) }) },
+      {
+        fps: 10,
+        qrbox: (w, h) => ({ width: Math.floor(w * 0.85), height: Math.floor(Math.min(h, w) * 0.4) }),
+        // 既定の低解像度だと離したときに線が潰れて読めず、近づけるとピントが合わない。
+        // 解像度を上げてピントの合う距離から読めるようにする
+        videoConstraints: {
+          facingMode: 'environment',
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          advanced: [{ focusMode: 'continuous' }],
+        },
+      },
       text => {
         const isbn = toIsbn13(text);
         if (isbn) handleIsbn(isbn);   // 下段の価格コード（192…）はここで無視される
       },
       () => {}
     );
+    setupZoom();
   } catch (err) {
     setStatus('カメラを起動できませんでした。ブラウザのカメラ許可を確認するか、ISBN を手入力してください。', 'err');
   }
 }
+
+// ズーム対応の端末（主に Android）では、離した位置から大きく映せるよう 2 倍で始める
+function setupZoom() {
+  let caps;
+  try { caps = scanner.getRunningTrackCapabilities(); } catch { caps = {}; }
+  const z = caps.zoom;
+  if (!z || !(z.max > z.min)) { $('zoomRow').hidden = true; return; }
+  const apply = v => {
+    $('zoomVal').textContent = `${Number(v).toFixed(1)}×`;
+    scanner.applyVideoConstraints({ advanced: [{ zoom: Number(v) }] }).catch(() => {});
+  };
+  const el = $('zoom');
+  el.min = z.min; el.max = z.max; el.step = z.step || 0.1;
+  el.value = Math.min(z.max, Math.max(z.min, 2));
+  el.oninput = () => apply(el.value);
+  apply(el.value);
+  $('zoomRow').hidden = false;
+}
+
+// 映像で読めない端末向け。標準カメラで撮った高解像度の写真から読む
+let fileReader = null;
+$('photo').onchange = async e => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file || busy) return;
+  await stopScanner();
+  setStatus('写真を読み取り中…');
+  try {
+    if (!fileReader) fileReader = newReader('fileReader');
+    const text = await fileReader.scanFile(file, false);
+    const isbn = toIsbn13(text);
+    if (isbn) { handleIsbn(isbn); return; }
+    setStatus('下段のバーコードが読み取られました。上段だけが写るように撮り直してください。', 'err');
+  } catch {
+    setStatus('バーコードが見つかりませんでした。上段のバーコードを大きめに、ピントを合わせて撮り直してください。', 'err');
+  }
+  startScanner();
+};
 
 async function stopScanner() {
   if (scanner?.isScanning) {
