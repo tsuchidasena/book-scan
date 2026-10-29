@@ -296,9 +296,11 @@ function showSetup() {
   $('setup').hidden = false;
   $('gasUrl').value = gasUrl;
 }
+const GAS_URL_RE = /^https:\/\/script\.google\.com\/(a\/macros\/[^/]+|macros)\/s\/[^/]+\/exec$/;
+
 $('saveUrl').onclick = () => {
   const url = $('gasUrl').value.trim();
-  if (!/^https:\/\/script\.google\.com\/(a\/macros\/[^/]+|macros)\/s\/[^/]+\/exec$/.test(url)) {
+  if (!GAS_URL_RE.test(url)) {
     setStatus('URL は https://script.google.com/macros/s/…/exec の形です', 'err');
     return;
   }
@@ -310,6 +312,19 @@ $('saveUrl').onclick = () => {
   startScanner();
 };
 $('editUrl').onclick = showSetup;
+
+// #u=<ウェブアプリURL> 付きで開かれたら記憶する。# 以降はサーバーに送られない
+const fromHash = new URLSearchParams(location.hash.slice(1)).get('u');
+if (fromHash) {
+  history.replaceState(null, '', location.pathname + location.search);
+  if (GAS_URL_RE.test(fromHash)) {
+    gasUrl = fromHash;
+    store.set('gasUrl', fromHash);
+    setStatus('ウェブアプリURLを設定しました', 'ok');
+  } else {
+    setStatus('リンクに含まれるURLの形式が正しくありません', 'err');
+  }
+}
 
 if (gasUrl) {
   api('GET', {}).then(d => fillOptions(d.options)).catch(() => {});
